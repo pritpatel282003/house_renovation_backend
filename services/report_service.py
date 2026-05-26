@@ -1,5 +1,7 @@
 import asyncio
 import io
+import logging
+import httpx
 from datetime import datetime
 from typing import Any
 
@@ -13,13 +15,52 @@ from reportlab.platypus import (
     Spacer,
     Table,
     TableStyle,
+    Image as RLImage,
 )
 
+logger = logging.getLogger(__name__)
 PAGE_WIDTH, PAGE_HEIGHT = A4
 MARGIN = 0.75 * inch
 
 
-def _generate_report_sync(project_data: dict[str, Any]) -> bytes:
+async def _download_image_bytes(url: str) -> bytes | None:
+    """Download an image URL and return raw bytes, or None on failure."""
+    if not url:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            content = resp.content
+            logger.info("Downloaded image from %s (%d bytes)", url, len(content))
+            return content
+    except Exception as exc:
+        logger.warning("Failed to download image %s: %s", url, exc)
+        return None
+
+
+def _make_rl_image(img_bytes: bytes | None, max_width: float, max_height: float) -> RLImage | None:
+    if not img_bytes:
+        return None
+    try:
+        img = RLImage(io.BytesIO(img_bytes))
+        aspect = img.imageHeight / float(img.imageWidth)
+        img.drawWidth = max_width
+        img.drawHeight = max_width * aspect
+        if img.drawHeight > max_height:
+            img.drawHeight = max_height
+            img.drawWidth = max_height / aspect
+        return img
+    except Exception as exc:
+        logger.error("Error creating reportlab image: %s", exc)
+        return None
+
+
+def _generate_report_sync(
+    project_data: dict[str, Any],
+    original_img_bytes: bytes | None = None,
+    redesigned_img_bytes: bytes | None = None,
+) -> bytes:
     """Build a PDF report and return it as bytes."""
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -60,9 +101,52 @@ def _generate_report_sync(project_data: dict[str, Any]) -> bytes:
     elements.append(Spacer(1, 20))
 
     usable_width = PAGE_WIDTH - 2 * MARGIN
+    max_img_height = 4 * inch
 
     material_assignments = project_data.get("material_assignments", {})
     cost_data = project_data.get("cost_data", {})
+    has_original = original_img_bytes is not None
+    has_redesigned = redesigned_img_bytes is not None
+
+    logger.info(
+        "Building PDF: has_original=%s, has_redesigned=%s",
+        has_original, has_redesigned
+    )
+
+    if has_original or has_redesigned:
+        if has_original and has_redesigned:
+            elements.append(Paragraph("Original Reference Photo", subtitle_style))
+            rl_orig = _make_rl_image(original_img_bytes, usable_width, max_img_height)
+            if rl_orig:
+                elements.append(rl_orig)
+            else:
+                elements.append(Paragraph("(Original image could not be rendered)", normal_style))
+            elements.append(Spacer(1, 16))
+
+            elements.append(Paragraph("AI Redesigned Visualization", subtitle_style))
+            rl_redes = _make_rl_image(redesigned_img_bytes, usable_width, max_img_height)
+            if rl_redes:
+                elements.append(rl_redes)
+            else:
+                elements.append(Paragraph("(Redesigned image could not be rendered)", normal_style))
+            elements.append(Spacer(1, 20))
+        elif has_original:
+            elements.append(Paragraph("Original Reference Photo", subtitle_style))
+            rl_orig = _make_rl_image(original_img_bytes, usable_width, max_img_height)
+            if rl_orig:
+                elements.append(rl_orig)
+            else:
+                elements.append(Paragraph("(Original image could not be rendered)", normal_style))
+            elements.append(Spacer(1, 20))
+        else:
+            elements.append(Paragraph("AI Redesigned Visualization", subtitle_style))
+            rl_redes = _make_rl_image(redesigned_img_bytes, usable_width, max_img_height)
+            if rl_redes:
+                elements.append(rl_redes)
+            else:
+                elements.append(Paragraph("(Redesigned image could not be rendered)", normal_style))
+            elements.append(Spacer(1, 20))
+
     line_items = cost_data.get("line_items", [])
 
     if material_assignments and line_items:
@@ -184,4 +268,40 @@ def _generate_report_sync(project_data: dict[str, Any]) -> bytes:
 
 
 async def generate_report(project_data: dict[str, Any]) -> bytes:
-    return await asyncio.to_thread(_generate_report_sync, project_data)
+    original_url = project_data.get("original_image_url")
+    redesigned_url = project_data.get("redesigned_image_url")
+
+    logger.info(
+        "generate_report called — original_url=%s, redesigned_url=%s",
+        original_url,
+        redesigned_url,
+    )
+
+    original_bytes, redesigned_bytes = None, None
+    tasks = []
+    keys = []
+    if original_url:
+        tasks.append(_download_image_bytes(original_url))
+        keys.append("original")
+    else:
+        logger.warning("No original_image_url in project data")
+
+    if redesigned_url:
+        tasks.append(_download_image_bytes(redesigned_url))
+        keys.append("redesigned")
+    else:
+        logger.warning("No redesigned_image_url in project data")
+
+    if tasks:
+        results = await asyncio.gather(*tasks)
+        for key, data in zip(keys, results):
+            if key == "original":
+                original_bytes = data
+                logger.info("Original image download: %s", "OK" if data else "FAILED")
+            else:
+                redesigned_bytes = data
+                logger.info("Redesigned image download: %s", "OK" if data else "FAILED")
+
+    return await asyncio.to_thread(
+        _generate_report_sync, project_data, original_bytes, redesigned_bytes
+    )
