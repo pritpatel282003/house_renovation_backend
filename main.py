@@ -46,9 +46,11 @@ app.add_middleware(
 )
 
 
+PUBLIC_PATHS = {"/health", "/docs", "/openapi.json", "/redoc", "/favicon.ico"}
+
 @app.middleware("http")
 async def verify_service_secret(request: Request, call_next):
-    if request.url.path == "/health":
+    if request.url.path in PUBLIC_PATHS:
         return await call_next(request)
 
     token = request.headers.get("x-service-secret", "")
