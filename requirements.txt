@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+pillow
+requests
+reportlab
+numpy
+opencv-python-headless
+python-multipart
+python-dotenv
+replicate
+openai
