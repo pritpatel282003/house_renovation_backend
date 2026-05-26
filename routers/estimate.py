@@ -37,9 +37,9 @@ async def estimate(req: EstimateRequest):
         if req.pixels_per_foot is not None:
             area_kwargs["pixels_per_foot"] = req.pixels_per_foot
 
-        area_data = calculate_areas(**area_kwargs)
+        area_data = await calculate_areas(**area_kwargs)
 
-        cost_data = calculate_costs(
+        cost_data = await calculate_costs(
             area_data=area_data,
             material_assignments=req.material_assignments,
             materials=req.materials,

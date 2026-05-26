@@ -22,7 +22,7 @@ class SegmentResponse(BaseModel):
 @router.post("", response_model=SegmentResponse)
 async def segment(req: SegmentRequest):
     try:
-        segments = segment_image(req.image_url)
+        segments = await segment_image(req.image_url)
         return SegmentResponse(segments=segments)
     except Exception as exc:
         logger.exception("Segmentation failed for project %s", req.project_id)

@@ -15,6 +15,8 @@ from fastapi.responses import JSONResponse
 
 from routers import segment, visualize, estimate, report, validate, ai_design
 
+from services.http_client import close_http_client, init_http_client
+
 logger = logging.getLogger("renovation-service")
 logging.basicConfig(level=logging.INFO)
 
@@ -25,6 +27,7 @@ ROBOFLOW_MODEL_ID = os.getenv("ROBOFLOW_MODEL_ID", "")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await init_http_client()
     if ROBOFLOW_API_KEY and ROBOFLOW_MODEL_ID:
         logger.info("Roboflow API configured — model: %s", ROBOFLOW_MODEL_ID)
     else:
@@ -33,6 +36,7 @@ async def lifespan(app: FastAPI):
             "segmentation will use mock fallback"
         )
     yield
+    await close_http_client()
 
 
 app = FastAPI(title="Renovation AI Service", version="1.0.0", lifespan=lifespan)

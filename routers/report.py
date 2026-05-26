@@ -25,7 +25,7 @@ class ReportRequest(BaseModel):
 async def report(req: ReportRequest):
     try:
         project_data = req.model_dump()
-        pdf_bytes = generate_report(project_data)
+        pdf_bytes = await generate_report(project_data)
         return StreamingResponse(
             BytesIO(pdf_bytes),
             media_type="application/pdf",

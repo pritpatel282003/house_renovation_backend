@@ -24,7 +24,7 @@ class VisualizeResponse(BaseModel):
 @router.post("", response_model=VisualizeResponse)
 async def visualize(req: VisualizeRequest):
     try:
-        result_b64 = run_visualization(
+        result_b64 = await run_visualization(
             image_url=req.image_url,
             segmentation_data=req.segmentation_data,
             material_assignments=req.material_assignments,

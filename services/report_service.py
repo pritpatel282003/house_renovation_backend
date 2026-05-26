@@ -1,16 +1,13 @@
+import asyncio
 import io
-import logging
 from datetime import datetime
 from typing import Any
 
-import requests
-from PIL import Image as PILImage
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import (
-    Image,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -18,23 +15,11 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-logger = logging.getLogger(__name__)
-
 PAGE_WIDTH, PAGE_HEIGHT = A4
 MARGIN = 0.75 * inch
 
 
-def _fetch_image_bytes(url: str) -> io.BytesIO | None:
-    try:
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        return io.BytesIO(resp.content)
-    except Exception as exc:
-        logger.warning("Could not download image %s: %s", url, exc)
-        return None
-
-
-def generate_report(project_data: dict[str, Any]) -> bytes:
+def _generate_report_sync(project_data: dict[str, Any]) -> bytes:
     """Build a PDF report and return it as bytes."""
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -75,31 +60,6 @@ def generate_report(project_data: dict[str, Any]) -> bytes:
     elements.append(Spacer(1, 20))
 
     usable_width = PAGE_WIDTH - 2 * MARGIN
-    img_width = (usable_width - 10) / 2
-    img_height = img_width * 0.75
-
-    original_url = project_data.get("original_image_url")
-    redesigned_url = project_data.get("redesigned_image_url")
-
-    image_row: list[Any] = []
-    for label, url in [("Original", original_url), ("Redesigned", redesigned_url)]:
-        if url:
-            img_bytes = _fetch_image_bytes(url)
-            if img_bytes:
-                image_row.append(Image(img_bytes, width=img_width, height=img_height))
-            else:
-                image_row.append(Paragraph(f"[{label} image unavailable]", normal_style))
-        else:
-            image_row.append(Paragraph(f"[No {label.lower()} image]", normal_style))
-
-    if image_row:
-        img_table = Table([image_row], colWidths=[img_width + 5, img_width + 5])
-        img_table.setStyle(TableStyle([
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ]))
-        elements.append(img_table)
-        elements.append(Spacer(1, 20))
 
     material_assignments = project_data.get("material_assignments", {})
     cost_data = project_data.get("cost_data", {})
@@ -138,42 +98,44 @@ def generate_report(project_data: dict[str, Any]) -> bytes:
     if line_items:
         elements.append(Paragraph("Cost Breakdown", subtitle_style))
 
-        header = [
-            "Region", "Material", "Area\n(sqft)", "Qty", "Unit",
-            "Mat.Rate", "Labor\nRate", "Mat.Cost", "Labor\nCost", "Total",
-        ]
+        cell_style = ParagraphStyle(
+            "CellText", parent=normal_style, fontSize=8, leading=10
+        )
+
+        header = ["Region", "Material", "Area (sqft)", "Qty",
+                  "Mat. Rate", "Labor Rate", "Total Cost"]
         table_data = [header]
         for item in line_items:
+            region = item.get("region", "").replace("_", " ").title()
             table_data.append([
-                item.get("region", ""),
-                item.get("material_name", ""),
+                Paragraph(region, cell_style),
+                Paragraph(item.get("material_name", ""), cell_style),
                 f"{item.get('area_sqft', 0):.1f}",
                 f"{item.get('quantity', 0):.1f}",
-                item.get("unit", ""),
-                f"{item.get('material_rate', 0):.2f}",
-                f"{item.get('labor_rate', 0):.2f}",
-                f"{item.get('material_cost', 0):.2f}",
-                f"{item.get('labor_cost', 0):.2f}",
-                f"{item.get('total', 0):.2f}",
+                f"{item.get('material_rate', 0):,.0f}",
+                f"{item.get('labor_rate', 0):,.0f}",
+                f"{item.get('total_cost', 0):,.0f}",
             ])
 
         col_widths = [
             usable_width * w
-            for w in [0.12, 0.14, 0.08, 0.07, 0.07, 0.10, 0.10, 0.10, 0.10, 0.12]
+            for w in [0.15, 0.25, 0.12, 0.10, 0.13, 0.12, 0.13]
         ]
         cost_table = Table(table_data, colWidths=col_widths, repeatRows=1)
         cost_table.setStyle(TableStyle([
             ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a1a2e")),
             ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
             ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-            ("FONTSIZE", (0, 0), (-1, 0), 7),
-            ("FONTSIZE", (0, 1), (-1, -1), 7),
+            ("FONTSIZE", (0, 0), (-1, 0), 8),
+            ("FONTSIZE", (0, 1), (-1, -1), 8),
             ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
             ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
             ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f0f0f5")]),
             ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 3),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("TOPPADDING", (0, 0), (-1, -1), 5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
         ]))
         elements.append(cost_table)
         elements.append(Spacer(1, 20))
@@ -219,3 +181,7 @@ def generate_report(project_data: dict[str, Any]) -> bytes:
 
     doc.build(elements)
     return buf.getvalue()
+
+
+async def generate_report(project_data: dict[str, Any]) -> bytes:
+    return await asyncio.to_thread(_generate_report_sync, project_data)

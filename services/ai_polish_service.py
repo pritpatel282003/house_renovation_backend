@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import io
 import json
@@ -5,8 +6,9 @@ import logging
 import os
 from typing import Any
 
-import requests
 from PIL import Image
+
+from services.http_client import get_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -53,15 +55,21 @@ def _build_prompt(
     )
 
 
-def polish(
+def _encode_polished_result(result_b64: str) -> str:
+    polished_bytes = base64.b64decode(result_b64)
+    polished_img = Image.open(io.BytesIO(polished_bytes)).convert("RGB")
+
+    out_buf = io.BytesIO()
+    polished_img.save(out_buf, format="JPEG", quality=90)
+    return base64.b64encode(out_buf.getvalue()).decode("utf-8")
+
+
+async def polish(
     composited_b64: str,
     material_assignments: dict[str, str],
     materials: list[dict[str, Any]],
 ) -> str | None:
     """Send the overlay image to Azure OpenAI gpt-image-2 to generate a photorealistic version.
-
-    Uses streaming with partial images for faster perceived response,
-    JPEG output for smaller payloads, and 512x512 output for speed.
 
     Returns base64 JPEG of the AI-generated image, or None if unavailable.
     """
@@ -74,11 +82,11 @@ def polish(
     try:
         composited_bytes = base64.b64decode(composited_b64)
         composited_img = Image.open(io.BytesIO(composited_bytes)).convert("RGB")
-        composited_img = _resize_for_api(composited_img)
+        composited_img = await asyncio.to_thread(_resize_for_api, composited_img)
 
         img_buf = io.BytesIO()
-        composited_img.save(img_buf, format="JPEG", quality=85)
-        img_buf.seek(0)
+        await asyncio.to_thread(composited_img.save, img_buf, format="JPEG", quality=85)
+        img_bytes = img_buf.getvalue()
 
         prompt = _build_prompt(material_assignments, materials)
         logger.info("AI polish prompt: %s", prompt[:150])
@@ -89,11 +97,10 @@ def polish(
             f"?api-version={AZURE_API_VERSION}"
         )
 
-        resp = requests.post(
+        client = get_http_client()
+        resp = await client.post(
             url,
-            headers={
-                "api-key": AZURE_OPENAI_API_KEY,
-            },
+            headers={"api-key": AZURE_OPENAI_API_KEY},
             data={
                 "prompt": prompt,
                 "n": "1",
@@ -101,11 +108,8 @@ def polish(
                 "quality": "low",
                 "output_format": "jpeg",
             },
-            files={
-                "image": ("overlay.jpg", img_buf, "image/jpeg"),
-            },
-            timeout=300,
-            stream=True,
+            files={"image": ("overlay.jpg", img_bytes, "image/jpeg")},
+            timeout=300.0,
         )
 
         if resp.status_code != 200:
@@ -116,12 +120,7 @@ def polish(
             )
             return None
 
-        full_body = b""
-        for chunk in resp.iter_content(chunk_size=8192):
-            if chunk:
-                full_body += chunk
-
-        data = json.loads(full_body)
+        data = resp.json()
         images = data.get("data", [])
         if not images:
             logger.warning("Azure gpt-image-2 returned no image data")
@@ -132,12 +131,7 @@ def polish(
             logger.warning("Azure gpt-image-2 response missing b64_json")
             return None
 
-        polished_bytes = base64.b64decode(result_b64)
-        polished_img = Image.open(io.BytesIO(polished_bytes)).convert("RGB")
-
-        out_buf = io.BytesIO()
-        polished_img.save(out_buf, format="JPEG", quality=90)
-        return base64.b64encode(out_buf.getvalue()).decode("utf-8")
+        return await asyncio.to_thread(_encode_polished_result, result_b64)
 
     except Exception as exc:
         logger.exception("AI polish failed: %s", exc)

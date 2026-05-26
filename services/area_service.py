@@ -1,19 +1,12 @@
-import io
+import asyncio
 import logging
 from typing import Any
 
-import requests
-from PIL import Image
+from services.image_utils import download_image
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_PIXELS_PER_FOOT = 10.0
-
-
-def _download_image(url: str) -> Image.Image:
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
-    return Image.open(io.BytesIO(resp.content))
 
 
 def _shoelace_area(polygon: list[list[float]], width: int, height: int) -> float:
@@ -34,16 +27,13 @@ def _shoelace_area(polygon: list[list[float]], width: int, height: int) -> float
     return abs(area) / 2.0
 
 
-def calculate_areas(
-    image_url: str,
+def _compute_areas(
+    width: int,
+    height: int,
     segmentation_data: list[dict[str, Any]],
-    pixels_per_foot: float = DEFAULT_PIXELS_PER_FOOT,
+    pixels_per_foot: float,
 ) -> dict[str, dict[str, Any]]:
-    """Return mapping of segment label -> area info in sqft."""
-    img = _download_image(image_url)
-    width, height = img.size
-
-    sq_pixels_per_sqft = pixels_per_foot ** 2
+    sq_pixels_per_sqft = pixels_per_foot**2
     result: dict[str, dict[str, Any]] = {}
 
     for segment in segmentation_data:
@@ -54,3 +44,20 @@ def calculate_areas(
         result[label] = {"area_sqft": area_sqft, "unit": "sqft"}
 
     return result
+
+
+async def calculate_areas(
+    image_url: str,
+    segmentation_data: list[dict[str, Any]],
+    pixels_per_foot: float = DEFAULT_PIXELS_PER_FOOT,
+) -> dict[str, dict[str, Any]]:
+    """Return mapping of segment label -> area info in sqft."""
+    img = await download_image(image_url, mode="RGB")
+    width, height = img.size
+    return await asyncio.to_thread(
+        _compute_areas,
+        width,
+        height,
+        segmentation_data,
+        pixels_per_foot,
+    )

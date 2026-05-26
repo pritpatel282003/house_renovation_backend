@@ -4,7 +4,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def calculate_costs(
+async def calculate_costs(
     area_data: dict[str, dict[str, Any]],
     material_assignments: dict[str, str],
     materials: list[dict[str, Any]],

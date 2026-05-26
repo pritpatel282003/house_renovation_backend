@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import io
 import logging
@@ -5,19 +6,46 @@ from typing import Any
 
 import cv2
 import numpy as np
-import requests
 from PIL import Image, ImageDraw, ImageFilter
+
+from services.image_utils import download_image
 
 logger = logging.getLogger(__name__)
 
 FEATHER_RADIUS = 3
 TARGET_TEXTURE_PX = 128
+MAX_UPLOAD_BYTES = 9_500_000
+MAX_UPLOAD_SIDE = 2400
 
 
-def _download_image(url: str) -> Image.Image:
-    resp = requests.get(url, timeout=30)
-    resp.raise_for_status()
-    return Image.open(io.BytesIO(resp.content)).convert("RGBA")
+def _encode_image_for_upload(img: Image.Image) -> bytes:
+    """Encode as JPEG, resizing if needed to stay under Cloudinary upload limits."""
+    working = img.convert("RGB")
+    max_side = MAX_UPLOAD_SIDE
+
+    for _ in range(5):
+        w, h = working.size
+        if max(w, h) > max_side:
+            scale = max_side / max(w, h)
+            encoded_img = working.resize(
+                (max(1, int(w * scale)), max(1, int(h * scale))),
+                Image.LANCZOS,
+            )
+        else:
+            encoded_img = working
+
+        for quality in (90, 85, 80, 75):
+            buf = io.BytesIO()
+            encoded_img.save(buf, format="JPEG", quality=quality, optimize=True)
+            data = buf.getvalue()
+            if len(data) <= MAX_UPLOAD_BYTES:
+                return data
+
+        max_side = int(max_side * 0.75)
+
+    buf = io.BytesIO()
+    encoded_img.save(buf, format="JPEG", quality=70, optimize=True)
+    return buf.getvalue()
 
 
 def _scale_texture(texture: Image.Image, region_width: int) -> Image.Image:
@@ -64,11 +92,7 @@ def _perspective_warp(
     img_width: int,
     img_height: int,
 ) -> np.ndarray:
-    """Warp the tiled texture to match the polygon's perspective.
-
-    Uses the four extreme points (top-left, top-right, bottom-right, bottom-left)
-    of the polygon as destination corners.
-    """
+    """Warp the tiled texture to match the polygon's perspective."""
     bx1, by1, bx2, by2 = bbox
     box_w, box_h = bx2 - bx1, by2 - by1
 
@@ -109,11 +133,7 @@ def _luminosity_blend(
     texture_rgb: np.ndarray,
     mask: np.ndarray,
 ) -> np.ndarray:
-    """Blend texture onto base while preserving the original lighting.
-
-    Extracts the luminance channel from the original image and applies it
-    to the texture so shadows, highlights, and ambient occlusion persist.
-    """
+    """Blend texture onto base while preserving the original lighting."""
     base_f = base_rgb.astype(np.float32)
     tex_f = texture_rgb.astype(np.float32)
     mask_f = mask.astype(np.float32) / 255.0
@@ -137,14 +157,14 @@ def _luminosity_blend(
     return np.clip(result, 0, 255).astype(np.uint8)
 
 
-def visualize(
-    image_url: str,
+def _apply_textures(
+    base_img: Image.Image,
     segmentation_data: list[dict[str, Any]],
     material_assignments: dict[str, str],
     materials: list[dict[str, Any]],
+    texture_cache: dict[str, Image.Image],
 ) -> str:
-    """Apply material textures onto the original image and return base64 PNG."""
-    base_img = _download_image(image_url)
+    """CPU-bound texture compositing — runs in a thread pool."""
     width, height = base_img.size
 
     base_rgb = np.array(base_img.convert("RGB"))
@@ -158,17 +178,13 @@ def visualize(
         reverse=True,
     )
 
-    all_masks: list[Image.Image | None] = []
     all_polygons: list[list[tuple[int, int]]] = []
     for segment in sorted_segments:
         polygon = segment.get("mask_polygon", [])
         if polygon:
-            px_poly = _denormalize_polygon(polygon, width, height)
-            all_polygons.append(px_poly)
-            all_masks.append(None)
+            all_polygons.append(_denormalize_polygon(polygon, width, height))
         else:
             all_polygons.append([])
-            all_masks.append(None)
 
     for seg_idx, segment in enumerate(sorted_segments):
         label: str = segment["label"]
@@ -184,10 +200,9 @@ def visualize(
             logger.warning("No texture URL for material %s", material_id)
             continue
 
-        try:
-            texture_img = _download_image(texture_url)
-        except Exception as exc:
-            logger.warning("Failed to download texture for %s: %s", material_id, exc)
+        texture_img = texture_cache.get(texture_url)
+        if texture_img is None:
+            logger.warning("Failed to download texture for %s", material_id)
             continue
 
         polygon = segment.get("mask_polygon", [])
@@ -230,6 +245,49 @@ def visualize(
         result_rgb[by1:by2, bx1:bx2] = blended_region
 
     result_img = Image.fromarray(result_rgb)
-    buf = io.BytesIO()
-    result_img.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
+    jpeg_bytes = _encode_image_for_upload(result_img)
+    logger.info("Overlay image encoded to %d KB JPEG", len(jpeg_bytes) // 1024)
+    return base64.b64encode(jpeg_bytes).decode("utf-8")
+
+
+async def visualize(
+    image_url: str,
+    segmentation_data: list[dict[str, Any]],
+    material_assignments: dict[str, str],
+    materials: list[dict[str, Any]],
+) -> str:
+    """Apply material textures onto the original image and return base64 PNG."""
+    base_img = await download_image(image_url, mode="RGBA")
+
+    material_map: dict[str, dict[str, Any]] = {m["id"]: m for m in materials}
+    texture_urls: set[str] = set()
+    for label, material_id in material_assignments.items():
+        material = material_map.get(material_id)
+        if not material:
+            continue
+        texture_url = material.get("texture_cloudinary_url") or material.get("texture_url")
+        if texture_url:
+            texture_urls.add(texture_url)
+
+    texture_cache: dict[str, Image.Image] = {}
+    download_tasks = []
+    url_list = list(texture_urls)
+    for url in url_list:
+        download_tasks.append(download_image(url, mode="RGBA"))
+
+    if download_tasks:
+        results = await asyncio.gather(*download_tasks, return_exceptions=True)
+        for url, result in zip(url_list, results):
+            if isinstance(result, Exception):
+                logger.warning("Failed to download texture %s: %s", url, result)
+            else:
+                texture_cache[url] = result
+
+    return await asyncio.to_thread(
+        _apply_textures,
+        base_img,
+        segmentation_data,
+        material_assignments,
+        materials,
+        texture_cache,
+    )

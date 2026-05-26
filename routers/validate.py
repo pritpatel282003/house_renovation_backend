@@ -11,5 +11,5 @@ class ValidateRequest(BaseModel):
 
 @router.post("/blur")
 async def validate_blur(body: ValidateRequest):
-    result = check_blur(body.image_url)
+    result = await check_blur(body.image_url)
     return result
