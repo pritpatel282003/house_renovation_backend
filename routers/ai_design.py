@@ -1,26 +1,13 @@
 import logging
-from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
 
+from schemas.ai_design import AiDesignRequest, AiDesignResponse
 from services.visualization_service import visualize as run_visualization
 from services.ai_polish_service import polish as run_polish
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-
-class AiDesignRequest(BaseModel):
-    image_url: str
-    segmentation_data: list[dict[str, Any]]
-    material_assignments: dict[str, str]
-    materials: list[dict[str, Any]]
-
-
-class AiDesignResponse(BaseModel):
-    overlay_image_base64: str
-    ai_polished_image_base64: str | None
 
 
 @router.post("", response_model=AiDesignResponse)

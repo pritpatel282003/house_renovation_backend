@@ -1,22 +1,12 @@
 import logging
-from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
 
+from schemas.segment import SegmentRequest, SegmentResponse
 from services.sam_service import segment_image
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-
-class SegmentRequest(BaseModel):
-    image_url: str
-    project_id: str
-
-
-class SegmentResponse(BaseModel):
-    segments: list[dict[str, Any]]
 
 
 @router.post("", response_model=SegmentResponse)

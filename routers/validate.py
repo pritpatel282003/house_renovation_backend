@@ -1,12 +1,9 @@
 from fastapi import APIRouter
-from pydantic import BaseModel
+
+from schemas.validate import ValidateRequest
 from services.validation_service import check_blur
 
 router = APIRouter()
-
-
-class ValidateRequest(BaseModel):
-    image_url: str
 
 
 @router.post("/blur")

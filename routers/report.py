@@ -1,24 +1,14 @@
 import logging
 from io import BytesIO
-from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 
+from schemas.report import ReportRequest
 from services.report_service import generate_report
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-
-class ReportRequest(BaseModel):
-    model_config = {"extra": "allow"}
-
-    title: str = "Untitled Project"
-    original_image_url: str | None = None
-    redesigned_image_url: str | None = None
-    cost_data: dict[str, Any] = {}
 
 
 @router.post("")
